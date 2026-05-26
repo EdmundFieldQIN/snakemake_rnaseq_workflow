@@ -59,9 +59,10 @@ Treat   T-2      T-2_R1.fq.gz     T-2_R2.fq.gz
 | `fastq1` | Read 1 FASTQ filename |
 | `fastq2` | Read 2 FASTQ filename |
 
-**`de_contrast.tsv`** — Pairwise comparisons (tab-separated, one per line):
+**`de_contrast.tsv`** — Pairwise comparisons (tab-separated, one per line): Use Group name
 ```
-WT      Treat
+Treatment1      Control
+Treatment2      Control
 ```
 
 ### 3. Run the pipeline

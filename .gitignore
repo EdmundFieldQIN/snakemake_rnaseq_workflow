@@ -1,5 +1,5 @@
 # Data directories (large files)
-data/
+data/LJC_RNA_SEQ
 result/
 
 # Snakemake
@@ -26,3 +26,38 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+data/rawdata/4-1_R1.fq.gz
+data/rawdata/4-1_R2.fq.gz
+data/rawdata/4-2_R1.fq.gz
+data/rawdata/4-2_R2.fq.gz
+data/rawdata/4-3_R1.fq.gz
+data/rawdata/4-3_R2.fq.gz
+data/rawdata/46-1_R1.fq.gz
+data/rawdata/46-1_R2.fq.gz
+data/rawdata/46-2_R1.fq.gz
+data/rawdata/46-2_R2.fq.gz
+data/rawdata/46-3_R1.fq.gz
+data/rawdata/46-3_R2.fq.gz
+data/rawdata/6-1_R1.fq.gz
+data/rawdata/6-1_R2.fq.gz
+data/rawdata/6-2_R1.fq.gz
+data/rawdata/6-2_R2.fq.gz
+data/rawdata/6-3_R1.fq.gz
+data/rawdata/6-3_R2.fq.gz
+data/rawdata/WT-1_R1.fq.gz
+data/rawdata/WT-1_R2.fq.gz
+data/rawdata/WT-2_R1.fq.gz
+data/rawdata/WT-2_R2.fq.gz
+data/rawdata/WT-3_R1.fq.gz
+data/rawdata/WT-3_R2.fq.gz
+data/ref/all.con
+data/ref/genes.gtf
+data/ref/genome.hisat2.1.ht2
+data/ref/genome.hisat2.2.ht2
+data/ref/genome.hisat2.3.ht2
+data/ref/genome.hisat2.4.ht2
+data/ref/genome.hisat2.5.ht2
+data/ref/genome.hisat2.6.ht2
+data/ref/genome.hisat2.7.ht2
+data/ref/genome.hisat2.8.ht2
+CLAUDE.md
