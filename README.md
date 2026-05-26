@@ -13,7 +13,31 @@ FASTQ → fastp (trimming) → FastQC/MultiQC → HISAT2 (alignment)
 ## Requirements
 
 - [Conda](https://docs.conda.io/) or [Miniconda](https://docs.conda.io/en/latest/miniconda.html)
-- [Snakemake](https://snakemake.readthedocs.io/) (installed automatically via conda environment)
+- [Snakemake](https://snakemake.readthedocs.io/)
+
+### Create the conda environment
+
+Before running the pipeline, create the required conda environment named `rnaseq` using the provided specification file:
+
+```bash
+conda env create -f workflow/env/rnaseq_env.yaml
+```
+
+This will install all required tools: fastp, FastQC, MultiQC, HISAT2, samtools, featureCounts (Rsubread), R, DESeq2, edgeR, tidyverse, Quarto, and other dependencies.
+
+If you need to update an existing environment:
+
+```bash
+conda env update -f workflow/env/rnaseq_env.yaml
+```
+
+Activate the environment before running the pipeline manually:
+
+```bash
+conda activate rnaseq
+```
+
+> **Note:** When using `snakemake --use-conda`, Snakemake will manage the environment automatically. However, pre-building it with the command above is recommended to avoid timeouts during the first run.
 
 ## Quick Start
 

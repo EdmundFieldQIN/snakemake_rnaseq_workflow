@@ -1,4 +1,4 @@
-name: rnaseq_tmp
+name: rnaseq
 channels:
   - defaults
   - conda-forge
