@@ -1,0 +1,515 @@
+---
+title: "RNA-seq Analysis Report"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    embed-resources: true
+    theme: cosmo
+    code-fold: true
+    code-summary: "Show code"
+execute:
+  warning: false
+  message: false
+params:
+  workdir: "."
+  samples_file: "../config/samples.tsv"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, dpi = 150)
+
+library(tidyverse)
+library(jsonlite)
+
+workdir      <- params$workdir
+samples_file <- params$samples_file
+
+sample_info <- read_tsv(samples_file, col_names = c("group", "sample"),
+                        show_col_types = FALSE) %>%
+  column_to_rownames("sample")
+groups <- unique(sample_info$group)
+```
+
+# Sample Quality Control {#qc}
+
+```{r qc-data}
+json_files <- list.files(file.path(workdir, "01cleandata"),
+                         pattern = "\\.fastp\\.json$", full.names = TRUE)
+
+qc_data <- map_dfr(json_files, function(f) {
+  js <- fromJSON(f)
+  s  <- js$summary
+  tibble(
+    sample         = str_remove(basename(f), "\\.fastp\\.json$"),
+    raw_reads      = s$before_filtering$total_reads,
+    clean_reads    = s$after_filtering$total_reads,
+    retention      = round(clean_reads / raw_reads * 100, 2),
+    q20_before     = round(s$before_filtering$q20_rate * 100, 2),
+    q30_before     = round(s$before_filtering$q30_rate * 100, 2),
+    q20_after      = round(s$after_filtering$q20_rate * 100, 2),
+    q30_after      = round(s$after_filtering$q30_rate * 100, 2),
+    gc_content     = round(s$after_filtering$gc_content * 100, 2),
+    dup_rate       = round(js$duplication$rate * 100, 2)
+  )
+}) %>% arrange(sample)
+```
+
+## Read Filtering Summary
+
+```{r qc-table}
+qc_display <- qc_data %>%
+  select(sample, raw_reads, clean_reads, retention,
+         q20_before, q20_after, q30_before, q30_after,
+         gc_content, dup_rate) %>%
+  rename(
+    Sample      = sample,
+    `Raw Reads` = raw_reads,
+    `Clean Reads` = clean_reads,
+    `Retention %` = retention,
+    `Q20 Before %` = q20_before,
+    `Q20 After %`  = q20_after,
+    `Q30 Before %` = q30_before,
+    `Q30 After %`  = q30_after,
+    `GC %`       = gc_content,
+    `Dup %`      = dup_rate
+  )
+
+knitr::kable(qc_display, format = "pipe", digits = 2,
+             caption = "Per-sample read filtering statistics (fastp)")
+```
+
+## Quality Score Distribution
+
+```{r qc-plot, fig.height=7}
+qc_long <- qc_data %>%
+  select(sample, q20_before, q20_after, q30_before, q30_after) %>%
+  pivot_longer(-sample, names_to = "metric", values_to = "value") %>%
+  mutate(
+    base  = ifelse(str_detect(metric, "q20"), "Q20", "Q30"),
+    stage = ifelse(str_detect(metric, "before"), "Before", "After"),
+    stage = factor(stage, levels = c("Before", "After"))
+  )
+
+ggplot(qc_long, aes(x = sample, y = value, fill = stage)) +
+  geom_col(position = "dodge", width = 0.7) +
+  facet_wrap(~ base, ncol = 2) +
+  scale_fill_manual(values = c("Before" = "#95a5a6", "After" = "#2c3e50")) +
+  labs(x = NULL, y = "Rate (%)",
+       title = "Q20/Q30 base quality before and after filtering",
+       fill = "Stage") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(face = "bold", size = 13))
+```
+
+::: {.callout-note title="QC Methods & Parameters"}
+
+**Trimming tool:** fastp
+**Pipeline command:**
+```bash
+fastp -i {input.r1} -I {input.r2} \
+  -o {output.r1} -O {output.r2} \
+  -w 4 -h {output.report} -j {output.json}
+```
+**Key parameters:** `-w 4` (4 threads), default quality filter enabled.
+
+<!-- USER: Add your custom QC notes, specific parameter explanations, or any observations about sample quality here -->
+
+:::
+
+---
+
+# Alignment Statistics {#alignment}
+
+```{r align-data}
+log_files <- list.files(file.path(workdir, "03aligned"),
+                        pattern = "\\.hisat2\\.log$", full.names = TRUE)
+
+parse_hisat2_log <- function(fp) {
+  txt <- readLines(fp)
+  sample <- str_remove(basename(fp), "\\.hisat2\\.log$")
+  overall <- unique_conc <- multi_conc <- unaligned_conc <- NA_real_
+  for (line in txt) {
+    if (str_detect(line, "Overall alignment rate"))
+      overall <- as.numeric(str_extract(line, "[0-9]+\\.[0-9]+"))
+    if (str_detect(line, "Aligned concordantly or discordantly 0 time"))
+      unaligned_conc <- as.numeric(str_extract(line, "[0-9]+\\.[0-9]+"))
+    if (str_detect(line, "Aligned concordantly 1 time"))
+      unique_conc <- as.numeric(str_extract(line, "[0-9]+\\.[0-9]+"))
+    if (str_detect(line, "Aligned concordantly >1 times"))
+      multi_conc <- as.numeric(str_extract(line, "[0-9]+\\.[0-9]+"))
+  }
+  tibble(sample, overall, unique_conc, multi_conc, unaligned_conc)
+}
+
+align_data <- map_dfr(log_files, parse_hisat2_log) %>% arrange(sample)
+```
+
+## Alignment Summary
+
+```{r align-table}
+align_display <- align_data %>%
+  rename(
+    Sample                = sample,
+    `Overall %`           = overall,
+    `Unique Concordant %` = unique_conc,
+    `Multi-mapped %`      = multi_conc,
+    `Unaligned %`         = unaligned_conc
+  )
+
+knitr::kable(align_display, format = "pipe", digits = 2,
+             caption = "Per-sample HISAT2 alignment statistics")
+```
+
+## Alignment Rate by Sample
+
+```{r align-plot, fig.height=7}
+align_long <- align_data %>%
+  select(sample, unique_conc, multi_conc, unaligned_conc) %>%
+  pivot_longer(-sample, names_to = "category", values_to = "pct") %>%
+  mutate(
+    category = case_when(
+      category == "unique_conc"    ~ "Unique Concordant",
+      category == "multi_conc"     ~ "Multi-mapped",
+      category == "unaligned_conc" ~ "Unaligned"
+    ),
+    category = factor(category, levels = c("Unaligned", "Multi-mapped", "Unique Concordant"))
+  )
+
+ggplot(align_long, aes(x = sample, y = pct, fill = category)) +
+  geom_col(width = 0.65) +
+  scale_fill_manual(values = c(
+    "Unique Concordant" = "#27ae60",
+    "Multi-mapped"      = "#f39c12",
+    "Unaligned"         = "#c0392b"
+  )) +
+  labs(x = NULL, y = "Percentage of read pairs (%)",
+       title = "HISAT2 alignment composition by sample",
+       fill = "Category") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+::: {.callout-note title="Alignment Command & Parameters"}
+
+**Aligner:** HISAT2
+**Pipeline command:**
+```bash
+hisat2 -x genome.hisat2 -p 10 \
+  -1 {input.r1} -2 {input.r2} \
+  --new-summary --rna-strandness RF \
+  -S {output.sam}
+```
+**Key parameters:**
+- `-p 10`: 10 threads
+- `--rna-strandness RF`: stranded paired-end (fr-firststrand)
+- `--new-summary`: machine-readable summary log
+
+<!-- USER: Add notes about alignment parameters, reference genome version, or any alignment quality observations here -->
+
+:::
+
+---
+
+# Expression Matrix {#expression}
+
+```{r expr-data}
+count_matrix <- file.path(workdir, "05expression", "genes.counts.matrix")
+tmm_matrix   <- file.path(workdir, "05expression", "genes.TMM.EXPR.matrix")
+
+counts <- read_tsv(count_matrix, show_col_types = FALSE)
+tmm    <- read_tsv(tmm_matrix,   show_col_types = FALSE)
+
+sample_names <- colnames(counts)[-1]
+expr_summary <- tibble(
+  sample        = sample_names,
+  total_counts  = map_dbl(sample_names, ~ sum(counts[[.x]], na.rm = TRUE)),
+  n_expressed   = map_dbl(sample_names, ~ sum(counts[[.x]] > 0, na.rm = TRUE)),
+  pct_expressed = round(n_expressed / nrow(counts) * 100, 1)
+)
+```
+
+## Matrix Overview
+
+- **Total genes:** `r nrow(counts)`
+- **Samples:** `r ncol(counts) - 1`
+
+## Per-Sample Count Summary
+
+```{r expr-table}
+expr_display <- expr_summary %>%
+  rename(
+    Sample              = sample,
+    `Total Counts`      = total_counts,
+    `Genes Detected`    = n_expressed,
+    `% of All Genes`    = pct_expressed
+  )
+
+knitr::kable(expr_display, format = "pipe",
+             caption = "Per-sample expression summary")
+```
+
+## Sample Correlation Heatmap
+
+```{r corr-heatmap, fig.height=8, fig.width=9}
+tmm_mat <- tmm %>%
+  column_to_rownames("feature_id") %>%
+  as.matrix()
+
+# Order samples by group
+sample_order <- sample_info %>%
+  rownames_to_column("sample") %>%
+  arrange(group, sample) %>%
+  pull(sample)
+
+sample_cor <- cor(tmm_mat[, sample_order], method = "pearson")
+
+cor_df <- as.data.frame(as.table(sample_cor)) %>%
+  rename(V1 = Var1, V2 = Var2, corr = Freq) %>%
+  mutate(
+    V1 = factor(V1, levels = sample_order),
+    V2 = factor(V2, levels = sample_order)
+  )
+
+ggplot(cor_df, aes(x = V1, y = V2, fill = corr)) +
+  geom_tile(color = "white", size = 0.5) +
+  geom_text(aes(label = round(corr, 3)), size = 3) +
+  scale_fill_gradient2(low = "#2980b9", mid = "white", high = "#c0392b",
+                       midpoint = median(cor_df$corr), limits = c(min(cor_df$corr), 1)) +
+  labs(x = NULL, y = NULL, fill = "Pearson r",
+       title = "Sample correlation (TMM-normalized, ordered by group)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## PCA Plot
+
+```{r pca-plot, fig.height=7, fig.width=8}
+tmm_log <- log2(tmm_mat + 1)
+tmm_var <- apply(tmm_log, 1, var, na.rm = TRUE)
+tmm_log <- tmm_log[tmm_var > 0, ]
+
+pca_res <- prcomp(t(tmm_log), center = TRUE, scale. = TRUE)
+pca_df  <- as.data.frame(pca_res$x) %>%
+  rownames_to_column("sample") %>%
+  left_join(
+    sample_info %>% rownames_to_column("sample"),
+    by = "sample"
+  )
+
+pve <- round(summary(pca_res)$importance[2, 1:2] * 100, 1)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = group, label = sample)) +
+  geom_point(size = 3.5) +
+  geom_text(aes(label = sample), size = 3.5, vjust = -1, show.legend = FALSE) +
+  labs(
+    x = paste0("PC1 (", pve[1], "%)"),
+    y = paste0("PC2 (", pve[2], "%)"),
+    title = "PCA of TMM-normalized expression",
+    color = "Group"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+::: {.callout-note title="Expression Analysis Methods"}
+
+**Quantification:** featureCounts (gene-level, exon features, stranded mode 2)
+**Normalization:** TMM (edgeR), applied to both counts and TPM matrices
+**PCA:** log2(TMM + 1) transformed, centered and scaled
+
+<!-- USER: Add notes about expression patterns, outlier samples, batch effects, or other observations here -->
+
+:::
+
+---
+
+# Differential Expression Analysis {#de}
+
+```{r de-data}
+de_dir <- file.path(workdir, "06de_analysis", "DESeq2_Result")
+de_files <- list.files(de_dir, pattern = "\\.DE_results$", full.names = TRUE)
+
+de_summary <- map_dfr(de_files, function(fp) {
+  fname    <- basename(fp)
+  contrast <- str_remove(fname, "genes\\.counts\\.matrix\\.")
+  contrast <- str_remove(contrast, "\\.DESeq2\\.DE_results")
+
+  res <- read_tsv(fp, show_col_types = FALSE)
+  total   <- nrow(res)
+  padj05  <- sum(res$padj < 0.05, na.rm = TRUE)
+  up      <- sum(res$padj < 0.05 & res$log2FoldChange > 1,  na.rm = TRUE)
+  down    <- sum(res$padj < 0.05 & res$log2FoldChange < -1, na.rm = TRUE)
+
+  tibble(contrast, total_genes = total, padj_sig = padj05, up = up, down = down)
+}) %>% arrange(desc(padj_sig))
+```
+
+## DEG Summary by Contrast
+
+```{r de-table}
+de_display <- de_summary %>%
+  rename(
+    Contrast          = contrast,
+    `Genes Tested`    = total_genes,
+    `padj < 0.05`     = padj_sig,
+    `Up (log2FC > 1)` = up,
+    `Down (log2FC < -1)` = down
+  )
+
+knitr::kable(de_display, format = "pipe",
+             caption = "Differentially expressed genes per contrast (DESeq2)")
+```
+
+## DEG Counts
+
+```{r de-barplot, fig.height=6}
+de_bar <- de_summary %>%
+  select(contrast, up, down) %>%
+  pivot_longer(-contrast, names_to = "direction", values_to = "count") %>%
+  mutate(direction = factor(direction, levels = c("up", "down")))
+
+ggplot(de_bar, aes(x = reorder(contrast, count), y = count, fill = direction)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = ifelse(count > 0, count, "")),
+            position = position_stack(vjust = 0.5), size = 4, color = "white") +
+  scale_fill_manual(
+    values  = c("up" = "#c0392b", "down" = "#2980b9"),
+    labels  = c("up" = "Up-regulated", "down" = "Down-regulated")
+  ) +
+  coord_flip() +
+  labs(x = NULL, y = "Number of DEGs",
+       title = "DEG counts per contrast (padj < 0.05 & |log2FC| > 1)",
+       fill = "Direction") +
+  theme_minimal(base_size = 13)
+```
+
+## Volcano Plots {#volcano}
+
+::: {.panel-tabset}
+
+```{r, results='asis'}
+volcano_theme <- theme_minimal(base_size = 13) +
+  theme(legend.position = "top")
+
+for (i in seq_len(nrow(de_summary))) {
+  contrast_name <- de_summary$contrast[i]
+  cat(sprintf("### %s\n\n", contrast_name))
+
+  de_file <- file.path(de_dir,
+    paste0("genes.counts.matrix.", contrast_name, ".DESeq2.DE_results"))
+  de_res <- read_tsv(de_file, show_col_types = FALSE) %>%
+    mutate(
+      neg_log10_padj = pmin(-log10(padj), 50),
+      significance = case_when(
+        padj < 0.05 & log2FoldChange > 1   ~ "Up",
+        padj < 0.05 & log2FoldChange < -1  ~ "Down",
+        TRUE                               ~ "NS"
+      )
+    )
+
+  n_up   <- sum(de_res$significance == "Up")
+  n_down <- sum(de_res$significance == "Down")
+
+  p <- ggplot(de_res, aes(x = log2FoldChange, y = neg_log10_padj,
+                          color = significance)) +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", alpha = 0.3) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.3) +
+    scale_color_manual(
+      values = c("Up" = "#c0392b", "Down" = "#2980b9", "NS" = "#bdc3c7")
+    ) +
+    labs(
+      x        = "log2 Fold Change",
+      y        = "-log10(adjusted p-value)",
+      title    = contrast_name,
+      subtitle = paste0("Up: ", n_up, "  |  Down: ", n_down,
+                        "  (padj < 0.05, |log2FC| > 1)"),
+      color    = NULL
+    ) +
+    volcano_theme
+
+  print(p)
+  cat("\n\n")
+}
+```
+
+:::
+
+::: {.callout-note title="DE Analysis Methods"}
+
+**Method:** DESeq2 (run via Trinity `run_DE_analysis.pl`)
+**Significance thresholds:** padj < 0.05, |log2FC| > 1
+**Contrasts file:** `config/de_contrast.tsv`
+
+<!-- USER: Add notes about DE results interpretation, specific genes of interest, or custom thresholds here -->
+
+:::
+
+---
+
+# Software Versions {#software}
+
+```{r software-info, echo=FALSE, results='asis'}
+cat("## Command-line Tools\n\n")
+
+get_cli_version <- function(cmd, version_flag = "--version") {
+  tryCatch({
+    out <- system(paste(cmd, version_flag, "2>&1"), intern = TRUE)
+    out <- out[nchar(trimws(out)) > 0]
+    if (length(out) > 0) trimws(out[1]) else "not found"
+  }, error = function(e) "not found")
+}
+
+fp_ver <- NA_character_
+json_files <- list.files(file.path(workdir, "01cleandata"),
+                         pattern = "\\.fastp\\.json$", full.names = TRUE)
+if (length(json_files) > 0) {
+  fp_ver <- tryCatch(fromJSON(json_files[1])$summary$fastp_version, error = function(e) NA)
+}
+
+cli_versions <- tibble(
+  Tool = c("fastp", "HISAT2", "samtools", "Quarto"),
+  Version = c(
+    ifelse(is.na(fp_ver), "unknown", fp_ver),
+    get_cli_version("hisat2"),
+    get_cli_version("samtools"),
+    get_cli_version("quarto")
+  )
+)
+knitr::kable(cli_versions, format = "pipe",
+             caption = "Command-line tool versions")
+
+cat("\n\n## R Environment\n\n")
+
+r_info <- tibble(
+  Component = c("R", "Platform"),
+  Detail = c(R.version$version.string, R.version$platform)
+)
+knitr::kable(r_info, format = "pipe")
+
+cat("\n\n## R Packages\n\n")
+
+pkg_list <- c("tidyverse", "ggplot2", "dplyr", "readr", "tidyr", "jsonlite",
+              "DESeq2", "edgeR", "Rsubread", "limma")
+
+pkgs <- tibble(Package = character(0), Version = character(0))
+
+for (p in pkg_list) {
+  ver <- tryCatch(as.character(packageVersion(p)), error = function(e) "not installed")
+  pkgs <- bind_rows(pkgs, tibble(Package = p, Version = ver))
+}
+
+other_pkgs <- setdiff(names(sessionInfo()$otherPkgs), pkg_list)
+for (p in other_pkgs) {
+  ver <- tryCatch(as.character(packageVersion(p)), error = function(e) NA_character_)
+  if (!is.na(ver)) {
+    pkgs <- bind_rows(pkgs, tibble(Package = p, Version = ver))
+  }
+}
+
+knitr::kable(pkgs, format = "pipe",
+             caption = "R package versions used in this analysis")
+```

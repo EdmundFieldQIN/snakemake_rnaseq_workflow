@@ -1,0 +1,10 @@
+workdir: result
+units: ../config/units.tsv
+contrast: ../config/de_contrast.tsv
+PE: true
+
+
+ref:
+  genome: ../data/ref/all.con
+  annotation: ../data/ref/genes.gtf
+

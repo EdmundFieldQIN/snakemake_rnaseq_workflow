@@ -1,0 +1,215 @@
+# from snakemake.utils import min_version
+import pandas as pd
+# 设置配置文件
+configfile: "config/config.yaml"
+# 设置工作目录
+workdir: config["workdir"]
+
+# 读取config文件中的units.tsv文件
+# 从配置文件指定的样本列表文件中读取样本名，生成样本列表SAMPLES
+# 读取 units 表，建立 sample → rawdata 的映射
+units = pd.read_csv(config["units"], sep='\t', header=0)
+RAW_R1 = dict(zip(units.iloc[:, 1], units.iloc[:, 2]))
+RAW_R2 = dict(zip(units.iloc[:, 1], units.iloc[:, 3]))
+SAMPLES = list(RAW_R1.keys())
+# SAMPLES = pd.read_csv(config["units"], sep='\t', header=0, usecols=[1]).squeeze("columns").tolist()
+GENOMES = config["ref"]["genome"]
+ANNOTATIONS = config["ref"]["annotation"]
+print("samples:", SAMPLES)
+print("genomes:", GENOMES)
+print("annotations:", ANNOTATIONS)
+
+
+
+
+rule all:
+    input:
+        expand("03aligned/{sample}.bam", sample=SAMPLES),  # 所有样本比对BAM文件
+        "../config/samples.tsv",  # 生成的samples.tsv文件
+        "02fastqc/multiqc_report.html",
+        "05expression/genes.counts.matrix",                   # 基因表达矩阵
+        "06de_analysis/DESeq2_Result",  # DE分析结果目录
+        "report.html",  # 综合分析报告
+        "report_qmd.html"  # Quarto综合分析报告
+
+
+# 识别genome和注释文件是否为gz结尾，如果是gz结尾，则解压到data/ref目录下
+rule unzip_genome_annotation:
+    input:
+        genome=config["ref"]["genome"],
+        annotation=config["ref"]["annotation"]
+    output:
+        genome="../data/ref/" + os.path.basename(config["ref"]["genome"]).replace(".gz", ""),
+        annotation="../data/ref/" + os.path.basename(config["ref"]["annotation"]).replace(".gz", "")
+    log: "logs/unzip_genome_annotation.log"
+    conda: "rnaseq" # conda: "../workflow/env/rnaseq_env.yaml"
+    run:
+        import shutil
+        for inp, out in [(input.genome, output.genome),
+                         (input.annotation, output.annotation)]:
+            if inp.endswith('.gz'):
+                shell("gzip -d -c {inp} > {out}")
+            elif os.path.realpath(inp) != os.path.realpath(out):
+                shutil.copy(inp, out)
+            # else: same file (not .gz, no copy needed)
+
+rule make_samples_file:
+    input: 
+        config["units"]
+    output: 
+        "../config/samples.tsv"
+    shell: # 去除第一行，提取前两列，生成samples.tsv文件
+        "awk 'NR>1 {{print $1\"\\t\"$2}}' {input} > {output}"
+
+
+
+rule trim_fastq:
+    input: 
+        r1=lambda wildcards: "../data/rawdata/" + RAW_R1[wildcards.sample],
+        r2=lambda wildcards: "../data/rawdata/" + RAW_R2[wildcards.sample],
+    output: 
+        r1="01cleandata/{sample}_R1.clean.fq.gz",
+        r2="01cleandata/{sample}_R2.clean.fq.gz",
+        report="01cleandata/{sample}.fastp.html",
+        json="01cleandata/{sample}.fastp.json"
+    threads: 4 # 4线程
+    log: "logs/{sample}.fastp.log"# 日志文件
+    conda: "rnaseq"
+    shell:
+        "fastp -i {input.r1} -I {input.r2} -o {output.r1} -O {output.r2} -w {threads} -h {output.report} -j {output.json} > {log} 2>&1"
+
+rule fastqc_multiqc:
+    input: 
+        expand("01cleandata/{sample}.fastp.html", sample=SAMPLES),
+        expand("01cleandata/{sample}.fastp.json", sample=SAMPLES)
+    output: 
+        "02fastqc/multiqc_report.html"
+    threads: 10
+    conda: "rnaseq"
+    shell:
+        "fastqc -t {threads} -q -o 02fastqc/ 01cleandata/*.gz && multiqc 02fastqc/* -o 02fastqc/"
+
+
+rule build_hisat2_index:
+    input:  # 输入：配置文件中指定的基因组fasta文件
+        genome=rules.unzip_genome_annotation.output.genome
+    output:  # 输出：HISAT2索引文件
+        idx=expand("../data/ref/genome.hisat2.{idx}.ht2", idx=range(1, 9))
+    log: "logs/build_hisat2_index.log"
+    conda: "rnaseq"
+    threads: 10
+    shell:  # hisat2-build构建索引
+        """
+        hisat2-build -p {threads} {input.genome} ../data/ref/genome.hisat2 1>{log} 2>&1
+        """
+
+rule align_hisat2:
+    input:  # 输入：质控后fastp + HISAT2索引
+        r1="01cleandata/{sample}_R1.clean.fq.gz",
+        r2="01cleandata/{sample}_R2.clean.fq.gz",
+        idx=expand("../data/ref/genome.hisat2.{idx}.ht2", idx=range(1, 9))
+    output:  # 输出：SAM文件 + 比对日志
+        sam=temp("03aligned/{sample}.sam"),  
+        log="03aligned/{sample}.hisat2.log"
+    threads: 10
+    conda: "rnaseq"
+    shell: 
+        """
+        hisat2 -x ../data/ref/genome.hisat2 -p {threads} -1 {input.r1} -2 {input.r2} \
+            --new-summary --rna-strandness RF \
+            -S {output.sam} \
+            1> {output.log} 2>&1
+        """
+
+rule samtools_sort_idx:
+    input:  # 输入：SAM文件
+        sam="03aligned/{sample}.sam"
+    output:  # 输出：排序后的BAM + BAM索引
+        bam=protected("03aligned/{sample}.bam"),
+        idx="03aligned/{sample}.bam.bai"
+    threads: 10
+    log: "logs/{sample}.sort.log"
+    conda: "rnaseq"
+    shell:  # samtools排序+建索引
+        """
+        samtools sort -@ {threads} -o {output.bam} {input.sam} 1>{log} 2>&1
+        samtools index {output.bam}
+        """
+
+rule quantification:
+    input: 
+        bam = "03aligned/{sample}.bam",
+        gtf = rules.unzip_genome_annotation.output.annotation
+    output: 
+        expr="04quantification/{sample}.count",
+        log="04quantification/{sample}.log"
+    params: 
+        outputprefix = "04quantification/{sample}"
+    conda: "rnaseq"
+    shell:
+        "Rscript ../workflow/script/run-featurecounts.R -b {input.bam} -g {input.gtf} -f exon -a gene_id -i TRUE -s 2 -o {params.outputprefix}"
+
+rule abundance_estimates_to_matrix:
+    input:  # 输入：所有样本的count文件
+        exprs=expand("04quantification/{sample}.count", sample=SAMPLES)
+    output:  # 输出：合并后的计数矩阵 + TPM矩阵
+        "05expression/genes.counts.matrix",
+        "05expression/genes.FPKM.EXPR.matrix",
+        "05expression/genes.TPM.EXPR.matrix",
+        "05expression/genes.TMM.EXPR.matrix",
+        "05expression/genes.TPM.TMM.EXPR.matrix"
+    conda: "rnaseq"
+    run:  
+        unique_exprs = list(set(input.exprs))
+        with open("05expression/quant_files.txt", "w") as f:
+            for expr in unique_exprs:
+                f.write(f"{expr}\n")
+        shell("""
+        Rscript ../workflow/script/abundance_to_matrices.R \
+            --est_method featureCounts \
+            --out_prefix 05expression/genes \
+            --quant_files 05expression/quant_files.txt
+        """)
+    
+rule de_analysis:
+    input: 
+        martrix="05expression/genes.counts.matrix",
+        contrast=config["contrast"],
+        samples_file=rules.make_samples_file.output
+    output: 
+        directory("06de_analysis/DESeq2_Result/")
+    conda: "rnaseq"
+    shell:
+        """
+        mkdir -p 06de_analysis
+        run_DE_analysis.pl --matrix {input.martrix} --method DESeq2 --samples_file {input.samples_file} --contrast {input.contrast} --output {output}
+        python ../workflow/script/add_gene_header.py {output}/*DE_results {output}/*count_matrix
+        """
+
+rule generate_report:
+    input:
+        fastp_json=expand("01cleandata/{sample}.fastp.json", sample=SAMPLES),
+        hisat2_logs=expand("03aligned/{sample}.hisat2.log", sample=SAMPLES),
+        count_matrix="05expression/genes.counts.matrix",
+        de_dir="06de_analysis/DESeq2_Result/"
+    output:
+        "report.html"
+    conda: "rnaseq"
+    shell:
+        "python ../workflow/script/make_report.py --workdir . --out {output}"
+
+rule generate_qmd_report:
+    input:
+        fastp_json=expand("01cleandata/{sample}.fastp.json", sample=SAMPLES),
+        hisat2_logs=expand("03aligned/{sample}.hisat2.log", sample=SAMPLES),
+        count_matrix="05expression/genes.counts.matrix",
+        tmm_matrix="05expression/genes.TMM.EXPR.matrix",
+        de_dir="06de_analysis/DESeq2_Result/",
+        samples_file=rules.make_samples_file.output
+    output:
+        "report_qmd.html"
+    conda: "rnaseq"
+    shell:
+        "quarto render ../workflow/script/report.qmd --to html "
+        "-P workdir:$(pwd) -P samples_file:$(pwd)/../config/samples.tsv "
+        "&& mv ../workflow/script/report.html {output}"

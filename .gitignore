@@ -1,0 +1,28 @@
+# Data directories (large files)
+data/
+result/
+
+# Snakemake
+.snakemake/
+snak.log
+
+# Conda environments
+.snakemake/conda/
+
+# R temporary files
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
